@@ -1,0 +1,9 @@
+services:
+  py6live:
+    build: .
+    container_name: py6live
+    restart: unless-stopped
+    environment:
+      KODE_GURU: "rahasianate"
+    ports:
+      - "9322:9322"
