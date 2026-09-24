@@ -283,7 +283,7 @@
     debounce: null, ketikTimer: null, reconnectIn: null,
     ikuti: true, scrollTimer: null, scrollTerakhir: 0, ketikHide: null,
     barisTerakhir: null, paksaScroll: false, paksaTimer: null,
-    sabInput: null, running: false, promptBerikut: null,
+    running: false, promptBerikut: null, inputAktif: null,
   };
 
   const TEKS_AWAL = `# Selamat datang di Py6Live!
@@ -672,8 +672,9 @@ for i in range(3):
     if (teks) tulisHasil(teks + "\n");
   }
 
-  function tampilkanInput(sab, prompt) {
-    S.sabInput = sab;
+  function tampilkanInput(id, prompt) {
+    if (S.inputAktif !== null) return;
+    S.inputAktif = id;
     const lead = (prompt || "").toString();
     const c = $("output");
     const line = document.createElement("div");
@@ -687,28 +688,29 @@ for i in range(3):
     c.scrollTop = c.scrollHeight;
     const inp = $("run-input");
     inp.focus();
+    const urlJawab = `${location.origin}/api/stdin/${encodeURIComponent(S.kode)}/jawab`;
     const kirim = () => {
-      if (S.sabInput !== sab) return;
-      const i32 = new Int32Array(sab);
-      const bytes = new TextEncoder().encode(inp.value);
-      const tmp = new Uint8Array(sab, 16, sab.byteLength - 16);
-      tmp.set(bytes.subarray(0, tmp.length));
-      i32[1] = Math.min(bytes.length, tmp.length);
-      S.sabInput = null;
+      if (S.inputAktif !== id) return;
       const nilai = inp.value;
+      S.inputAktif = null;
       line.remove();
       tulisHasil(lead + nilai + "\n");
-      Atomics.store(i32, 0, 1);
-      Atomics.notify(i32, 0);
+      fetch(urlJawab, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, nilai }),
+      }).catch(() => {});
     };
     const batalkan = () => {
-      if (S.sabInput !== sab) return;
-      const i32 = new Int32Array(sab);
-      S.sabInput = null;
+      if (S.inputAktif !== id) return;
+      S.inputAktif = null;
       line.remove();
       tulisInfo("(input dibatalkan)");
-      Atomics.store(i32, 0, 2);
-      Atomics.notify(i32, 0);
+      fetch(urlJawab, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, batal: true }),
+      }).catch(() => {});
     };
     $("run-input-btn").addEventListener("click", kirim);
     inp.addEventListener("keydown", (ev) => {
@@ -725,7 +727,7 @@ for i in range(3):
         break;
       case "prompt-teks": S.promptBerikut = m.teks; break;
       case "input":
-        tampilkanInput(m.sab, S.promptBerikut);
+        tampilkanInput(m.id, m.prompt != null ? m.prompt : (S.promptBerikut || ""));
         S.promptBerikut = null;
         break;
       case "selesai":
@@ -749,7 +751,7 @@ for i in range(3):
 
   function selesaiRun() {
     S.running = false;
-    S.sabInput = null;
+    S.inputAktif = null;
     $("output-head").textContent = "Hasil Run";
     let out = S.runOut;
     if (!out.trim()) {
@@ -790,7 +792,7 @@ for i in range(3):
       tulisHasil(e.message + "\n", "stderr");
       return;
     }
-    worker.postMessage({ tipe: "jalan", kode: code });
+    worker.postMessage({ tipe: "jalan", kode: code, ruang: S.kode });
   }
 
   $("btn-copy").addEventListener("click", async () => {

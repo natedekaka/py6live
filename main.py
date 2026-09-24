@@ -29,6 +29,15 @@ class Ruang:
 rooms: dict[str, Ruang] = {}
 
 
+@dataclass
+class SesiInput:
+    antri: list = field(default_factory=list)
+    penunggu: list = field(default_factory=list)
+
+
+input_sesi: dict[str, SesiInput] = {}
+
+
 def buat_kode() -> str:
     while True:
         kode = "".join(random.choice(ALFABET) for _ in range(PANJANG_KODE))
@@ -89,6 +98,64 @@ async def buat_ruang(body: BuatRuangBody):
     kode = buat_kode()
     rooms[kode] = Ruang(kode=kode)
     return {"kode": kode}
+
+
+class StdinTungguBody(BaseModel):
+    id: str = ""
+
+
+class StdinJawabBody(BaseModel):
+    id: str = ""
+    nilai: str = ""
+    batal: bool = False
+
+
+@app.post("/api/stdin/{kode}")
+async def stdin_tunggu(kode: str, body: StdinTungguBody):
+    kode = kode.upper().strip()
+    if kode not in rooms:
+        return {"eof": True}
+    sesi = input_sesi.setdefault(kode, SesiInput())
+    for i, a in enumerate(sesi.antri):
+        if a["id"] == body.id:
+            ans = sesi.antri.pop(i)
+            break
+    else:
+        fut = asyncio.get_running_loop().create_future()
+        sesi.penunggu.append(fut)
+        try:
+            ans = await asyncio.wait_for(fut, timeout=180)
+        except asyncio.TimeoutError:
+            ans = {"id": body.id, "batal": True}
+    if ans.get("batal"):
+        return {"eof": True}
+    return {"nilai": ans.get("nilai", "")}
+
+
+@app.post("/api/stdin/{kode}/jawab")
+async def stdin_jawab(kode: str, body: StdinJawabBody):
+    kode = kode.upper().strip()
+    sesi = input_sesi.get(kode)
+    if sesi is None:
+        return {"ok": False}
+    ans = {"id": body.id, "nilai": body.nilai, "batal": body.batal}
+    if sesi.penunggu:
+        fut = sesi.penunggu.pop(0)
+        if not fut.done():
+            fut.set_result(ans)
+    else:
+        sesi.antri.append(ans)
+    return {"ok": True}
+
+
+@app.post("/api/stdin/{kode}/reset")
+async def stdin_reset(kode: str):
+    sesi = input_sesi.pop(kode.upper().strip(), None)
+    if sesi is not None:
+        for fut in sesi.penunggu:
+            if not fut.done():
+                fut.set_result({"id": "", "batal": True})
+    return {"ok": True}
 
 
 @app.websocket("/ws/{kode}")
@@ -218,6 +285,7 @@ async def ws_kelas(ws: WebSocket, kode: str):
         async with ruang.kunci:
             if ruang.guru is None and not ruang.siswa:
                 rooms.pop(ruang.kode, None)
+                input_sesi.pop(ruang.kode, None)
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
