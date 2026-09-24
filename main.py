@@ -19,6 +19,7 @@ class Ruang:
     kode: str
     teks: str = ""
     rev: int = 0
+    baris_guru: int = 1
     guru: Optional[WebSocket] = None
     nama_guru: str = ""
     siswa: dict = field(default_factory=dict)
@@ -66,6 +67,15 @@ async def siarkan(ruang: Ruang, data: dict, kecuali: Optional[set] = None) -> No
 
 
 app = FastAPI(title="Py6Live")
+
+
+@app.middleware("http")
+async def cache_no_store(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "no-cache, no-store")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Embedder-Policy", "require-corp")
+    return response
 
 
 class BuatRuangBody(BaseModel):
@@ -139,6 +149,7 @@ async def ws_kelas(ws: WebSocket, kode: str):
             "guru": jml_guru,
             "siswa": jml_siswa,
             "daftar": list(ruang.siswa.keys()),
+            "baris": ruang.baris_guru,
         },
     )
     await siarkan(
@@ -161,6 +172,8 @@ async def ws_kelas(ws: WebSocket, kode: str):
                     ruang.teks = teks
                     ruang.rev += 1
                     rev = ruang.rev
+                    if isinstance(pesan.get("baris"), int):
+                        ruang.baris_guru = pesan["baris"]
                 paket = {"tipe": "update", "teks": teks, "rev": rev}
                 if isinstance(pesan.get("baris"), int):
                     paket["baris"] = pesan["baris"]
@@ -177,6 +190,7 @@ async def ws_kelas(ws: WebSocket, kode: str):
                 if peran != "guru":
                     continue
                 if isinstance(pesan.get("baris"), int):
+                    ruang.baris_guru = pesan["baris"]
                     await siarkan(ruang, {"tipe": "scroll", "baris": pesan["baris"]}, kecuali={ws})
     except WebSocketDisconnect:
         pass

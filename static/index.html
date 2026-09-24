@@ -146,9 +146,25 @@
     font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word; color: var(--text);
   }
+  #output .thin { color: var(--muted); }
+  #output .stderr { color: var(--danger); }
   #btn-run:disabled { opacity: .6; cursor: progress; }
   .py-state { font-size: .8rem; color: var(--muted); }
   .err { color: var(--danger); font-size: .9rem; }
+  .input-line { display: flex; align-items: center; gap: 4px; }
+  .input-line::before { content: "> "; color: var(--accent); }
+  .input-line.no-prefix::before { content: none; }
+  .prompt { color: var(--text); }
+  .run-input {
+    flex: 1; min-width: 80px;
+    background: transparent; border: none; color: var(--text);
+    font: inherit; outline: none; padding: 0;
+  }
+  .run-input-btn {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 2px 12px; font-size: .85rem; cursor: pointer;
+  }
+  .run-input-btn:hover { border-color: var(--accent); color: var(--accent); }
   .kelas-layout { display: flex; gap: 16px; align-items: flex-start; }
   .kolom-utama { flex: 1; min-width: 0; }
   #pane-siswa {
@@ -238,7 +254,7 @@
         <div id="editor"></div>
         <div id="output-pane" class="hidden">
           <div id="output-head" class="output-head">Hasil Run</div>
-          <pre id="output"></pre>
+          <div id="output" class="console" role="log"></div>
         </div>
         <div class="status-bar"><span id="status">Menghubungkan...</span><span id="typing" class="typing hidden">Guru sedang mengetik...</span><span id="posisi" class="posisi"></span></div>
         <p class="note" id="hint"></p>
@@ -267,6 +283,7 @@
     debounce: null, ketikTimer: null, reconnectIn: null,
     ikuti: true, scrollTimer: null, scrollTerakhir: 0, ketikHide: null,
     barisTerakhir: null, paksaScroll: false, paksaTimer: null,
+    sabInput: null, running: false, promptBerikut: null,
   };
 
   const TEKS_AWAL = `# Selamat datang di Py6Live!
@@ -296,7 +313,7 @@ for i in range(3):
     badge.textContent = peran === "guru" ? "GURU" : "SISWA";
     badge.className = "badge " + peran;
     $("hint").textContent = peran === "guru"
-      ? "Mulai mengetik. Siswa melihat teks real-time. Tekan 'Jalankan' untuk menjalankan kodenya."
+      ? "Mulai mengetik. Siswa melihat teks real-time. Tekan 'Jalankan' untuk menjalankan; input() muncul di kolom hasil run."
       : "Teks diketik langsung oleh guru. Kamu bisa scroll bebas, tapi tidak bisa mengedit.";
     const punyaRun = peran === "guru";
     $("btn-run").classList.toggle("hidden", !punyaRun);
@@ -350,11 +367,11 @@ for i in range(3):
   function scrollKeBaris(view, baris) {
     const doc = view.state.doc;
     const n = Math.max(1, Math.min(baris, doc.lines));
-    const block = view.lineBlockAt(doc.line(n).from);
-    view.scrollDOM.scrollTop = Math.max(0, block.top - 8);
+    const pos = doc.line(n).from;
+    view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "start", yMargin: 8 }) });
     S.paksaScroll = true;
     clearTimeout(S.paksaTimer);
-    S.paksaTimer = setTimeout(() => S.paksaScroll = false, 300);
+    S.paksaTimer = setTimeout(() => S.paksaScroll = false, 400);
   }
 
   function kirimScrollGuru() {
@@ -369,7 +386,9 @@ for i in range(3):
   }
 
   function onScrollSiswa() {
-    if (S.paksaScroll || S.peran !== "siswa" || !S.ikuti) return;
+    if (S.peran !== "siswa" || !S.ikuti) return;
+    const t = barisAtas(S.siswaView);
+    if (typeof S.barisTerakhir === "number" && Math.abs(t - S.barisTerakhir) <= 2) return;
     S.ikuti = false;
     perbaruiTombolIkuti();
   }
@@ -404,6 +423,7 @@ for i in range(3):
         ],
       }),
     });
+    S.guruView.scrollDOM.addEventListener("scroll", kirimScrollGuru, { passive: true });
     updatePosisi(S.guruView);
   }
 
@@ -423,6 +443,7 @@ for i in range(3):
         ],
       }),
     });
+    S.siswaView.scrollDOM.addEventListener("scroll", onScrollSiswa, { passive: true });
     updatePosisi(S.siswaView);
   }
 
@@ -462,6 +483,10 @@ for i in range(3):
     onPeserta(m);
     if (m.peran === "siswa") {
       gantiTeks(S.siswaView, m.teks || "");
+      if (typeof m.baris === "number") {
+        S.barisTerakhir = m.baris;
+        if (S.ikuti) scrollKeBaris(S.siswaView, m.baris);
+      }
     } else {
       kirimPerubahanGuru();
       mulaiPramuatPython();
@@ -590,67 +615,182 @@ for i in range(3):
     }
   });
 
-  let pyodide = null, pyoPromise = null;
-  function initPyodide() {
-    if (pyoPromise) return pyoPromise;
+  let worker = null, workerSiap = null;
+
+  function initWorker() {
+    if (worker) return workerSiap;
     const el = $("py-state");
     el.textContent = "Memuat Python...";
-    pyoPromise = new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
-      s.onload = async () => { pyodide = await window.loadPyodide(); resolve(pyodide); };
-      s.onerror = () => reject(new Error("Gagal memuat Python dari CDN."));
-      document.head.appendChild(s);
-    }).then(py => { el.textContent = "Python siap"; return py; })
+    workerSiap = new Promise((resolve, reject) => {
+      worker = new Worker(new URL("worker.js", location.href).pathname);
+      worker.onmessage = (ev) => {
+        const m = ev.data;
+        if (m.tipe === "siap") resolve();
+        else if (m.tipe === "muat-gagal") reject(new Error(m.pesan));
+        else tanganiWorker(m);
+      };
+      worker.onerror = () => reject(new Error("Gagal memuat mesin Python."));
+    }).then(() => { el.textContent = "Python siap"; return worker; })
       .catch(e => { el.textContent = "Gagal memuat Python"; throw e; });
-    return pyoPromise;
+    worker.postMessage({ tipe: "muat" });
+    return workerSiap;
   }
 
   function mulaiPramuatPython() {
     if (S.pramuat) return;
     S.pramuat = true;
-    initPyodide().catch(() => {});
+    initWorker().catch(() => {});
+  }
+
+  function clipHasil() {
+    const c = $("output");
+    while (c.firstChild) c.removeChild(c.firstChild);
+  }
+
+  function tulisHasil(ch, cls) {
+    const c = $("output");
+    const s = document.createElement("span");
+    if (cls) s.className = cls;
+    s.textContent = ch;
+    c.appendChild(s);
+    c.scrollTop = c.scrollHeight;
+  }
+
+  function tulisInfo(ch) {
+    const c = $("output");
+    const s = document.createElement("div");
+    s.className = "thin";
+    s.textContent = ch;
+    c.appendChild(s);
+    c.scrollTop = c.scrollHeight;
   }
 
   function setOutput(teks, label) {
-    $("output").textContent = teks;
     $("output-head").textContent = label || "Hasil Run";
     $("output-pane").classList.remove("hidden");
+    clipHasil();
+    if (teks) tulisHasil(teks + "\n");
+  }
+
+  function tampilkanInput(sab, prompt) {
+    S.sabInput = sab;
+    const lead = (prompt || "").toString();
+    const c = $("output");
+    const line = document.createElement("div");
+    line.className = lead ? "input-line no-prefix" : "input-line";
+    line.innerHTML = `
+      ${lead ? '<span class="prompt"></span>' : ""}
+      <input id="run-input" type="text" class="run-input" placeholder="Input..." autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button id="run-input-btn" class="run-input-btn" type="button">OK</button>`;
+    if (lead) line.querySelector(".prompt").textContent = lead;
+    c.appendChild(line);
+    c.scrollTop = c.scrollHeight;
+    const inp = $("run-input");
+    inp.focus();
+    const kirim = () => {
+      if (S.sabInput !== sab) return;
+      const i32 = new Int32Array(sab);
+      const bytes = new TextEncoder().encode(inp.value);
+      const tmp = new Uint8Array(sab, 16, sab.byteLength - 16);
+      tmp.set(bytes.subarray(0, tmp.length));
+      i32[1] = Math.min(bytes.length, tmp.length);
+      S.sabInput = null;
+      const nilai = inp.value;
+      line.remove();
+      tulisHasil(lead + nilai + "\n");
+      Atomics.store(i32, 0, 1);
+      Atomics.notify(i32, 0);
+    };
+    const batalkan = () => {
+      if (S.sabInput !== sab) return;
+      const i32 = new Int32Array(sab);
+      S.sabInput = null;
+      line.remove();
+      tulisInfo("(input dibatalkan)");
+      Atomics.store(i32, 0, 2);
+      Atomics.notify(i32, 0);
+    };
+    $("run-input-btn").addEventListener("click", kirim);
+    inp.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); kirim(); }
+      else if (ev.key === "Escape") batalkan();
+    });
+  }
+
+  function tanganiWorker(m) {
+    switch (m.tipe) {
+      case "out":
+        S.runOut += m.data + (m.data.endsWith("\n") ? "" : "\n");
+        tulisHasil(m.data + (m.data.endsWith("\n") ? "" : "\n"), m.galat ? "stderr" : null);
+        break;
+      case "prompt-teks": S.promptBerikut = m.teks; break;
+      case "input":
+        tampilkanInput(m.sab, S.promptBerikut);
+        S.promptBerikut = null;
+        break;
+      case "selesai":
+        if (m.ret !== null) {
+          S.runOut += m.ret + "\n";
+          tulisHasil(m.ret + "\n");
+        }
+        selesaiRun();
+        break;
+      case "galat": {
+        const p = m.pesan.replace(/\n+$/, "");
+        if (!S.runOut.endsWith(p + "\n")) {
+          S.runOut += p + "\n";
+          tulisHasil(p + "\n", "stderr");
+        }
+        selesaiRun();
+        break;
+      }
+    }
+  }
+
+  function selesaiRun() {
+    S.running = false;
+    S.sabInput = null;
+    $("output-head").textContent = "Hasil Run";
+    let out = S.runOut;
+    if (!out.trim()) {
+      out = "(tidak ada output)";
+      tulisInfo(out);
+    }
+    const btn = $("btn-run");
+    btn.disabled = false;
+    btn.textContent = "Jalankan";
+    if (S.peran === "guru" && S.ws && S.ws.readyState === 1) {
+      S.ws.send(JSON.stringify({ tipe: "output", teks: out }));
+    }
   }
 
   async function jalankan() {
     const btn = $("btn-run");
-    if (btn.disabled) return;
+    if (btn.disabled || S.running) return;
     const code = S.peran === "guru"
       ? S.guruView.state.doc.toString()
       : S.siswaView.state.doc.toString();
+    const barisInput = document.querySelector(".input-line");
+    if (barisInput) barisInput.remove();
+    S.running = true;
+    S.runOut = "";
     btn.disabled = true;
     btn.textContent = "Menjalankan...";
-    setOutput("", "Menjalankan...");
+    $("output-head").textContent = "Menjalankan…";
+    $("output-pane").classList.remove("hidden");
+    clipHasil();
     try {
-      await initPyodide();
+      await initWorker();
     } catch (e) {
+      S.running = false;
       btn.disabled = false;
       btn.textContent = "Jalankan";
-      setOutput(e.message, "Galat");
+      $("output-head").textContent = "Hasil Run";
+      clipHasil();
+      tulisHasil(e.message + "\n", "stderr");
       return;
     }
-    let out = "";
-    try {
-      pyodide.setStdout({ batched: t => out += t + "\n" });
-      pyodide.setStderr({ batched: t => out += t + "\n" });
-      const ret = pyodide.runPython(code);
-      if (ret !== undefined && ret !== null) out += String(ret) + "\n";
-    } catch (e) {
-      out += (e.message ?? String(e)) + "\n";
-    }
-    if (!out.trim()) out = "(tidak ada output)";
-    btn.disabled = false;
-    btn.textContent = "Jalankan";
-    setOutput(out);
-    if (S.peran === "guru" && S.ws && S.ws.readyState === 1) {
-      S.ws.send(JSON.stringify({ tipe: "output", teks: out }));
-    }
+    worker.postMessage({ tipe: "jalan", kode: code });
   }
 
   $("btn-copy").addEventListener("click", async () => {
