@@ -284,6 +284,7 @@
     ikuti: true, scrollTimer: null, scrollTerakhir: 0, ketikHide: null,
     barisTerakhir: null, paksaScroll: false, paksaTimer: null,
     running: false, promptBerikut: null, inputAktif: null,
+    runLive: "", runTunggu: false, runAntri: [], runTimer: null,
   };
 
   const TEKS_AWAL = `# Selamat datang di Py6Live!
@@ -534,7 +535,12 @@ for i in range(3):
       case "update": onUpdate(m); break;
       case "peserta": onPeserta(m); break;
       case "guru-keluar": setBanner(m.pesan); break;
-      case "output": setOutput(m.teks, "Hasil run guru"); break;
+      case "output":
+        S.runLive = m.teks || "";
+        S.runTunggu = false;
+        setOutput(m.teks, "Hasil run guru");
+        break;
+      case "run": onRun(m); break;
       case "ketik": tunjukMengetik(); break;
       case "scroll":
         if (typeof m.baris === "number") S.barisTerakhir = m.baris;
@@ -672,6 +678,69 @@ for i in range(3):
     if (teks) tulisHasil(teks + "\n");
   }
 
+  function gambarRunSiswa() {
+    $("output-head").textContent = S.runTunggu
+      ? "Hasil run guru · menunggu input"
+      : "Hasil run guru";
+    $("output-pane").classList.remove("hidden");
+    clipHasil();
+    if (S.runLive) tulisHasil(S.runLive);
+    if (S.runTunggu) tulisInfo("(menunggu jawaban guru...)");
+  }
+
+  function onRun(m) {
+    if (m.mulai) {
+      S.runLive = "";
+      S.runTunggu = false;
+      gambarRunSiswa();
+      return;
+    }
+    S.runLive += m.teks || "";
+    S.runTunggu = !!m.tunggu;
+    gambarRunSiswa();
+  }
+
+  function antriRun(teks, tunggu) {
+    S.runAntri.push({ teks, tunggu: !!tunggu });
+    if (S.runTimer !== null) return;
+    S.runTimer = setTimeout(kirimRun, 120);
+  }
+
+  function kirimRun() {
+    clearTimeout(S.runTimer);
+    S.runTimer = null;
+    const antri = S.runAntri;
+    S.runAntri = [];
+    if (!antri.length) return;
+    if (S.peran !== "guru" || !S.ws || S.ws.readyState !== 1) return;
+    S.ws.send(JSON.stringify({
+      tipe: "run",
+      teks: antri.map(p => p.teks).join(""),
+      mulai: false,
+      tunggu: antri.some(p => p.tunggu),
+    }));
+  }
+
+  function mulaiRunSiaran() {
+    clearTimeout(S.runTimer);
+    S.runTimer = null;
+    S.runAntri = [];
+    if (S.peran !== "guru" || !S.ws || S.ws.readyState !== 1) return;
+    S.ws.send(JSON.stringify({ tipe: "run", teks: "", mulai: true, tunggu: false }));
+  }
+
+  function flushRun() {
+    clearTimeout(S.runTimer);
+    S.runTimer = null;
+    kirimRun();
+  }
+
+  function tulisRun(teks, cls, tunggu) {
+    S.runOut += teks;
+    if (teks) tulisHasil(teks, cls);
+    antriRun(teks, !!tunggu);
+  }
+
   function tampilkanInput(id, prompt) {
     if (S.inputAktif !== null) return;
     S.inputAktif = id;
@@ -694,7 +763,7 @@ for i in range(3):
       const nilai = inp.value;
       S.inputAktif = null;
       line.remove();
-      tulisHasil(lead + nilai + "\n");
+      tulisRun(nilai + "\n");
       fetch(urlJawab, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -705,7 +774,7 @@ for i in range(3):
       if (S.inputAktif !== id) return;
       S.inputAktif = null;
       line.remove();
-      tulisInfo("(input dibatalkan)");
+      tulisRun("(input dibatalkan)\n", "thin");
       fetch(urlJawab, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -722,27 +791,23 @@ for i in range(3):
   function tanganiWorker(m) {
     switch (m.tipe) {
       case "out":
-        S.runOut += m.data + (m.data.endsWith("\n") ? "" : "\n");
-        tulisHasil(m.data + (m.data.endsWith("\n") ? "" : "\n"), m.galat ? "stderr" : null);
+        tulisRun(m.data + (m.data.endsWith("\n") ? "" : "\n"), m.galat ? "stderr" : null);
         break;
       case "prompt-teks": S.promptBerikut = m.teks; break;
-      case "input":
-        tampilkanInput(m.id, m.prompt != null ? m.prompt : (S.promptBerikut || ""));
+      case "input": {
+        const prompt = m.prompt != null ? m.prompt : (S.promptBerikut || "");
         S.promptBerikut = null;
+        tulisRun(prompt ? String(prompt) + "\n" : "", null, true);
+        tampilkanInput(m.id, prompt);
         break;
+      }
       case "selesai":
-        if (m.ret !== null) {
-          S.runOut += m.ret + "\n";
-          tulisHasil(m.ret + "\n");
-        }
+        if (m.ret !== null) tulisRun(m.ret + "\n");
         selesaiRun();
         break;
       case "galat": {
         const p = m.pesan.replace(/\n+$/, "");
-        if (!S.runOut.endsWith(p + "\n")) {
-          S.runOut += p + "\n";
-          tulisHasil(p + "\n", "stderr");
-        }
+        if (!S.runOut.endsWith(p + "\n")) tulisRun(p + "\n", "stderr");
         selesaiRun();
         break;
       }
@@ -762,6 +827,7 @@ for i in range(3):
     btn.disabled = false;
     btn.textContent = "Jalankan";
     if (S.peran === "guru" && S.ws && S.ws.readyState === 1) {
+      flushRun();
       S.ws.send(JSON.stringify({ tipe: "output", teks: out }));
     }
   }
@@ -781,6 +847,9 @@ for i in range(3):
     $("output-head").textContent = "Menjalankan…";
     $("output-pane").classList.remove("hidden");
     clipHasil();
+    S.runLive = "";
+    S.runTunggu = false;
+    mulaiRunSiaran();
     try {
       await initWorker();
     } catch (e) {

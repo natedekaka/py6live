@@ -259,6 +259,19 @@ async def ws_kelas(ws: WebSocket, kode: str):
                 if isinstance(pesan.get("baris"), int):
                     ruang.baris_guru = pesan["baris"]
                     await siarkan(ruang, {"tipe": "scroll", "baris": pesan["baris"]}, kecuali={ws})
+            elif tipe == "run":
+                if peran != "guru":
+                    continue
+                await siarkan(
+                    ruang,
+                    {
+                        "tipe": "run",
+                        "teks": str(pesan.get("teks") or ""),
+                        "mulai": bool(pesan.get("mulai")),
+                        "tunggu": bool(pesan.get("tunggu")),
+                    },
+                    kecuali={ws},
+                )
     except WebSocketDisconnect:
         pass
     except Exception:
