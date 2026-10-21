@@ -137,7 +137,9 @@ async def stdin_jawab(kode: str, body: StdinJawabBody):
     kode = kode.upper().strip()
     sesi = input_sesi.get(kode)
     if sesi is None:
-        return {"ok": False}
+        # Jawaban bisa tiba sebelum permintaan /stdin worker terdaftar (race).
+        # Buat sesi dan simpan jawaban agar worker yang datang belakangan bisa mengambilnya.
+        sesi = input_sesi.setdefault(kode, SesiInput())
     ans = {"id": body.id, "nilai": body.nilai, "batal": body.batal}
     if sesi.penunggu:
         fut = sesi.penunggu.pop(0)
